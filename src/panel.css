@@ -1,0 +1,140 @@
+.asm-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0f16;
+  color: #f5f7fa;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.asm-map {
+  position: absolute;
+  inset: 0;
+}
+
+.asm-toolbar,
+.asm-status {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(12, 17, 25, 0.86);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+}
+
+.asm-toolbar {
+  top: 10px;
+  left: 10px;
+}
+
+.asm-status {
+  left: 10px;
+  bottom: 10px;
+  font-size: 12px;
+}
+
+.asm-toolbar button,
+.asm-modal button {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: #202938;
+  color: #f5f7fa;
+  cursor: pointer;
+}
+
+.asm-toolbar button:hover,
+.asm-modal button:hover {
+  background: #2c3850;
+}
+
+.asm-toolbar button.active,
+.asm-modal button.primary {
+  border-color: #4d8fff;
+  background: #315fc9;
+}
+
+.asm-center-message,
+.asm-error {
+  position: absolute;
+  z-index: 9;
+  left: 50%;
+  top: 50%;
+  max-width: min(520px, 80%);
+  transform: translate(-50%, -50%);
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(12, 17, 25, 0.9);
+  text-align: center;
+}
+
+.asm-error {
+  top: auto;
+  bottom: 48px;
+  border: 1px solid #ef4444;
+  color: #fecaca;
+}
+
+.asm-modal-backdrop {
+  position: absolute;
+  z-index: 50;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.asm-modal {
+  width: min(720px, calc(100% - 30px));
+  max-height: calc(100% - 30px);
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  padding: 16px;
+  background: #151c27;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+}
+
+.asm-modal h3 {
+  margin: 0 0 14px;
+}
+
+.asm-form-grid {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.45fr) minmax(220px, 1fr);
+  gap: 9px 12px;
+  align-items: center;
+}
+
+.asm-form-grid input,
+.asm-form-grid textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  padding: 7px 9px;
+  background: #0f1520;
+  color: #f5f7fa;
+}
+
+.asm-form-grid textarea {
+  min-height: 58px;
+  resize: vertical;
+}
+
+.asm-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.maplibregl-ctrl-attrib {
+  font-size: 10px;
+}
