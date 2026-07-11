@@ -3,6 +3,12 @@ export type LocalPoint = {
   y: number;
 };
 
+export type WorldOrigin = {
+  latitude: number;
+  longitude: number;
+  altitudeM: number;
+};
+
 export type AircraftState = {
   latitude?: number;
   longitude?: number;
@@ -11,12 +17,28 @@ export type AircraftState = {
   headingDeg?: number;
   pitchDeg?: number;
   rollDeg?: number;
-  aircraftLocal?: {
+  localPosition?: {
     x: number;
     y: number;
-    z?: number;
+    z: number;
   };
-  footprintLocal?: LocalPoint[];
+
+  sceneFootprintWorld?: LocalPoint[];
+};
+
+export type PanelConfig = {
+  follow: boolean;
+  gpsTopic: string;
+  telemetryTopic: string;
+  sceneTopic: string;
+  poseTopic: string;
+  originTopic: string;
+  horizontalFovDeg: number;
+  verticalFovDeg: number;
+  headingOffsetDeg: number;
+  preferSceneFootprint: boolean;
+  tileUrl: string;
+  attribution: string;
 };
 
 export const DEFAULT_TILE_URL =
@@ -25,20 +47,28 @@ export const DEFAULT_TILE_URL =
 export const DEFAULT_ATTRIBUTION =
   "Esri, Maxar, Earthstar Geographics, and the GIS User Community";
 
-export const TOPICS = {
-  gps: "/input/gps",
-  telemetry: "/input/telemetry",
-  sceneLive: "/scene/live",
-} as const;
+export const DEFAULT_CONFIG: PanelConfig = {
+  follow: true,
+  gpsTopic: "/input/gps",
+  telemetryTopic: "/input/telemetry",
+  sceneTopic: "/scene/live",
+  poseTopic: "/aircraft/pose",
+  originTopic: "/world/origin",
+  horizontalFovDeg: 43.2,
+  verticalFovDeg: 22.6,
+  headingOffsetDeg: 0,
+  preferSceneFootprint: true,
+  tileUrl: DEFAULT_TILE_URL,
+  attribution: DEFAULT_ATTRIBUTION,
+};
 
 export const VIEW = {
   minZoom: 2,
   maxZoom: 19,
-  mapPitchDeg: 55,
-  minimumVisibleWidthM: 700,
-  minimumLookAheadM: 140,
-  maximumLookAheadM: 5000,
-  lookAheadFactor: 1.25,
-  followPaddingFactor: 1.9,
-  footprintPaddingFactor: 2.0,
+  mapPitchDeg: 45,
+  initialZoom: 15,
+  followDurationMs: 650,
+  minimumMoveM: 0.6,
+  maximumTrackPoints: 10_000,
+  trackTeleportThresholdM: 2_000,
 } as const;

@@ -1,10 +1,10 @@
 {
   "name": "adaptive-satellite-map",
   "displayName": "Adaptive Satellite Map",
-  "description": "Adaptive satellite map panel for Foxglove with scene-driven aircraft model, camera rays, and exact footprint from /scene/live.",
+  "description": "Adaptive satellite map with a true 3D aircraft model.",
   "publisher": "alex-nurba-valya",
   "homepage": "",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "main": "./dist/extension.js",
   "keywords": [
@@ -24,11 +24,16 @@
     "package": "foxglove-extension package",
     "pretest": "foxglove-extension pretest"
   },
+  "dependencies": {
+    "maplibre-gl": "^5.6.2",
+    "three": "^0.180.0"
+  },
   "devDependencies": {
     "@foxglove/eslint-plugin": "2.0.0",
     "@foxglove/extension": "^2.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
+    "@types/three": "^0.180.0",
     "create-foxglove-extension": "1.3.2",
     "css-loader": "7.1.2",
     "eslint": "^9.39.0",
@@ -39,8 +44,5 @@
     "style-loader": "4.0.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.48.0"
-  },
-  "dependencies": {
-    "maplibre-gl": "^5.6.2"
   }
 }

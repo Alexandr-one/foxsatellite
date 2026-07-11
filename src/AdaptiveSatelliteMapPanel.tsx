@@ -1,188 +1,292 @@
-import { Immutable, MessageEvent, PanelExtensionContext } from "@foxglove/extension";
+import {
+  Immutable,
+  MessageEvent,
+  PanelExtensionContext,
+  SettingsTreeAction,
+  Topic,
+} from "@foxglove/extension";
 import maplibregl, { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  ReactElement,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 
 import {
-  aircraftLonLat,
   asArray,
   asRecord,
-  dedupeClosingPoint,
-  desiredZoom,
-  firstDefined,
-  followCenter,
-  footprintGeoJson,
+  computeCameraFootprint,
+  haversineDistanceM,
   normalizeHeadingDeg,
   numberProp,
   prop,
-  quaternionToYawDeg,
-  raysGeoJson,
+  quaternionToEulerDeg,
+  relativeFootprintToLonLat,
+  resolveHeightAboveWorldPlane,
   stringProp,
+  worldFootprintToLonLat,
 } from "./geo";
-import { AircraftState, DEFAULT_ATTRIBUTION, DEFAULT_TILE_URL, LocalPoint, TOPICS, VIEW } from "./types";
+import { FootprintCorner, ThreeAircraftLayer } from "./ThreeAircraftLayer";
+import {
+  AircraftState,
+  DEFAULT_CONFIG,
+  LocalPoint,
+  PanelConfig,
+  VIEW,
+  WorldOrigin,
+} from "./types";
 import "./panel.css";
 
-type PanelProps = { context: PanelExtensionContext };
-type StoredState = { follow?: boolean; autoZoom?: boolean };
+type PanelProps = {
+  context: PanelExtensionContext;
+};
+
+type PersistedState = Partial<PanelConfig>;
+
+type MessageState = {
+  aircraft?: AircraftState;
+  origin?: WorldOrigin;
+};
 
 function emptyFeatureCollection(): GeoJSON.FeatureCollection {
-  return { type: "FeatureCollection", features: [] };
+  return {
+    type: "FeatureCollection",
+    features: [],
+  };
 }
 
 function source(map: MapLibreMap, id: string): GeoJSONSource | undefined {
   return map.getSource(id) as GeoJSONSource | undefined;
 }
 
-function roundTripLine(points: LocalPoint[]): LocalPoint[] {
-  const deduped = dedupeClosingPoint(points);
-  return deduped.length >= 4 ? deduped.slice(0, 4) : deduped;
+function parseLocalPoint(value: unknown): LocalPoint | undefined {
+  const x = numberProp(value, "x");
+  const y = numberProp(value, "y");
+
+  if (x == undefined || y == undefined) {
+    return undefined;
+  }
+
+  return { x, y };
 }
 
-function parseFootprintEntity(entity: unknown): LocalPoint[] | undefined {
-  const lineCandidates = asArray(prop(entity, "lines"));
-  for (const line of lineCandidates) {
-    const type = stringProp(line, "type");
-    const points = asArray(prop(line, "points"))
-      .map((point) => ({ x: numberProp(point, "x") ?? 0, y: numberProp(point, "y") ?? 0 }))
-      .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-    if (points.length >= 4 && type !== "LINE_LIST") {
-      const normalized = roundTripLine(points);
-      if (normalized.length >= 4) {
-        return normalized;
+function parseSceneFootprint(message: Record<string, unknown>): LocalPoint[] | undefined {
+  for (const entity of asArray(prop(message, "entities"))) {
+    const id = stringProp(entity, "id") ?? "";
+
+    if (id !== "camera_scan" && !id.includes("camera")) {
+      continue;
+    }
+
+    for (const line of asArray(prop(entity, "lines"))) {
+      if (stringProp(line, "type") === "LINE_LIST") {
+        continue;
       }
+
+      const points = asArray(prop(line, "points"))
+        .map(parseLocalPoint)
+        .filter((point): point is LocalPoint => point != undefined);
+
+      if (points.length < 4) {
+        continue;
+      }
+
+      const first = points[0]!;
+      const last = points[points.length - 1]!;
+
+      const withoutClosingPoint =
+        Math.abs(first.x - last.x) < 1e-6 && Math.abs(first.y - last.y) < 1e-6
+          ? points.slice(0, -1)
+          : points;
+
+      return withoutClosingPoint.slice(0, 4);
     }
   }
 
-  const triangles = asArray(prop(entity, "triangles"));
-  for (const triangle of triangles) {
-    const points = asArray(prop(triangle, "points"))
-      .map((point) => ({ x: numberProp(point, "x") ?? 0, y: numberProp(point, "y") ?? 0 }))
-      .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-    const unique: LocalPoint[] = [];
-    for (const point of points) {
-      if (!unique.some((existing) => Math.abs(existing.x - point.x) < 1e-6 && Math.abs(existing.y - point.y) < 1e-6)) {
-        unique.push(point);
-      }
-    }
-    if (unique.length >= 4) {
-      return unique.slice(0, 4);
-    }
-  }
   return undefined;
 }
 
-function parseAircraftPoseEntity(entity: unknown):
-  | { x: number; y: number; z?: number; headingDeg?: number }
-  | undefined {
-  const primitivePose = firstDefined(
-    prop(asArray(prop(entity, "triangles"))[0], "pose"),
-    prop(asArray(prop(entity, "spheres"))[0], "pose"),
-    prop(asArray(prop(entity, "cubes"))[0], "pose"),
-    prop(asArray(prop(entity, "models"))[0], "pose"),
+function parsePose(message: Record<string, unknown>): Partial<AircraftState> {
+  const pose = asRecord(prop(message, "pose"));
+  const position = asRecord(prop(pose, "position"));
+  const orientation = asRecord(prop(pose, "orientation"));
+
+  const euler = quaternionToEulerDeg(
+    numberProp(orientation, "x"),
+    numberProp(orientation, "y"),
+    numberProp(orientation, "z"),
+    numberProp(orientation, "w"),
   );
-  const position = asRecord(prop(primitivePose, "position"));
-  const orientation = asRecord(prop(primitivePose, "orientation"));
+
   return {
-    x: numberProp(position, "x") ?? 0,
-    y: numberProp(position, "y") ?? 0,
-    z: numberProp(position, "z"),
-    headingDeg: normalizeHeadingDeg(
-      quaternionToYawDeg(
-        numberProp(orientation, "x"),
-        numberProp(orientation, "y"),
-        numberProp(orientation, "z"),
-        numberProp(orientation, "w"),
-      ),
-    ),
+    localPosition: {
+      x: numberProp(position, "x") ?? 0,
+      y: numberProp(position, "y") ?? 0,
+      z: numberProp(position, "z") ?? 0,
+    },
+    headingDeg: euler?.yawDeg,
+    pitchDeg: euler?.pitchDeg,
+    rollDeg: euler?.rollDeg,
   };
 }
 
-function parseSceneLive(message: Record<string, unknown>): Partial<AircraftState> {
-  const entities = asArray(prop(message, "entities"));
-  let footprintLocal: LocalPoint[] | undefined;
-  let aircraftLocal: { x: number; y: number; z?: number } | undefined;
-  let headingDeg: number | undefined;
+function mergeDefined<T extends object>(base: T | undefined, patch: Partial<T>): T {
+  const result = {
+    ...(base ?? ({} as T)),
+  };
 
-  for (const entity of entities) {
-    const id = stringProp(entity, "id") ?? "";
-    if (id === "camera_scan" || id.includes("camera")) {
-      footprintLocal = parseFootprintEntity(entity) ?? footprintLocal;
-    }
-    if (id === "aircraft" || id.includes("aircraft")) {
-      const pose = parseAircraftPoseEntity(entity);
-      if (pose != undefined) {
-        aircraftLocal = { x: pose.x, y: pose.y, z: pose.z };
-        headingDeg = pose.headingDeg ?? headingDeg;
-      }
+  for (const [key, value] of Object.entries(patch)) {
+    if (value != undefined) {
+      (result as Record<string, unknown>)[key] = value;
     }
   }
 
-  return { footprintLocal, aircraftLocal, headingDeg };
+  return result;
 }
 
-function mergeMessage(current: AircraftState | undefined, event: Immutable<MessageEvent>): AircraftState | undefined {
+function eventTimeNs(event: Immutable<MessageEvent>): bigint | undefined {
+  const receiveTime = asRecord(event.receiveTime);
+  const sec = numberProp(receiveTime, "sec");
+  const nsec = numberProp(receiveTime, "nsec");
+
+  if (sec == undefined || nsec == undefined) {
+    return undefined;
+  }
+
+  return BigInt(Math.trunc(sec)) * 1_000_000_000n + BigInt(Math.trunc(nsec));
+}
+
+function mergeMessage(
+  current: MessageState,
+  event: Immutable<MessageEvent>,
+  config: PanelConfig,
+): MessageState {
   const message = asRecord(event.message);
+
   if (message == undefined) {
     return current;
   }
 
-  if (event.topic === TOPICS.gps) {
+  if (event.topic === config.originTopic) {
     const latitude = numberProp(message, "latitude");
     const longitude = numberProp(message, "longitude");
+    const altitudeM = numberProp(message, "altitude");
+
+    if (latitude == undefined || longitude == undefined || altitudeM == undefined) {
+      return current;
+    }
+
+    return {
+      ...current,
+      origin: {
+        latitude,
+        longitude,
+        altitudeM,
+      },
+    };
+  }
+
+  if (event.topic === config.gpsTopic) {
+    const latitude = numberProp(message, "latitude");
+    const longitude = numberProp(message, "longitude");
+
     if (latitude == undefined || longitude == undefined) {
       return current;
     }
-    const gpsHeading = numberProp(message, "heading");
-    const headingDeg =
-      gpsHeading != undefined && Math.abs(gpsHeading) <= Math.PI * 2
-        ? (gpsHeading * 180) / Math.PI
-        : gpsHeading;
+
+    const headingRad = numberProp(message, "heading");
+
     return {
       ...current,
-      latitude,
-      longitude,
-      altitudeM: numberProp(message, "altitude") ?? current?.altitudeM,
-      headingDeg: current?.headingDeg ?? normalizeHeadingDeg(headingDeg),
+      aircraft: mergeDefined(current.aircraft, {
+        latitude,
+        longitude,
+        altitudeM: numberProp(message, "altitude"),
+        headingDeg:
+          headingRad == undefined
+            ? undefined
+            : normalizeHeadingDeg(
+                (headingRad * 180) / Math.PI + config.headingOffsetDeg,
+              ),
+      }),
     };
   }
 
-  if (event.topic === TOPICS.telemetry) {
+  if (event.topic === config.poseTopic) {
     return {
       ...current,
-      latitude: numberProp(message, "latitude_deg") ?? current?.latitude,
-      longitude: numberProp(message, "longitude_deg") ?? current?.longitude,
-      altitudeM: numberProp(message, "altitude_m") ?? current?.altitudeM,
-      aglM: numberProp(message, "agl_m") ?? current?.aglM,
-      headingDeg: normalizeHeadingDeg(numberProp(message, "yaw_deg")) ?? current?.headingDeg,
-      pitchDeg: numberProp(message, "pitch_deg") ?? current?.pitchDeg,
-      rollDeg: numberProp(message, "roll_deg") ?? current?.rollDeg,
+      aircraft: mergeDefined(current.aircraft, parsePose(message)),
     };
   }
 
-  if (event.topic === TOPICS.sceneLive) {
-    return { ...current, ...parseSceneLive(message) };
+  if (event.topic === config.telemetryTopic) {
+    const yawDeg = numberProp(message, "yaw_deg");
+
+    return {
+      ...current,
+      aircraft: mergeDefined(current.aircraft, {
+        latitude: numberProp(message, "latitude_deg"),
+        longitude: numberProp(message, "longitude_deg"),
+        altitudeM: numberProp(message, "altitude_m"),
+        aglM: numberProp(message, "agl_m"),
+        headingDeg:
+          yawDeg == undefined
+            ? undefined
+            : normalizeHeadingDeg(yawDeg + config.headingOffsetDeg),
+        pitchDeg: numberProp(message, "pitch_deg"),
+        rollDeg: numberProp(message, "roll_deg"),
+      }),
+    };
+  }
+
+  if (event.topic === config.sceneTopic) {
+    const sceneFootprintWorld = parseSceneFootprint(message);
+
+    if (sceneFootprintWorld == undefined) {
+      return current;
+    }
+
+    return {
+      ...current,
+      aircraft: mergeDefined(current.aircraft, {
+        sceneFootprintWorld,
+      }),
+    };
   }
 
   return current;
 }
 
-function aircraftGeoJson(state: AircraftState): GeoJSON.FeatureCollection {
-  const coordinates = aircraftLonLat(state);
-  if (coordinates == undefined) {
+function aircraftLonLat(state: AircraftState): [number, number] | undefined {
+  if (state.latitude == undefined || state.longitude == undefined) {
+    return undefined;
+  }
+
+  return [state.longitude, state.latitude];
+}
+
+function polygonGeoJson(
+  coordinates: [number, number][] | undefined,
+): GeoJSON.FeatureCollection {
+  if (coordinates == undefined || coordinates.length < 4) {
     return emptyFeatureCollection();
   }
+
   return {
     type: "FeatureCollection",
     features: [
       {
         type: "Feature",
-        properties: {
-          heading: state.headingDeg ?? 0,
-        },
+        properties: {},
         geometry: {
-          type: "Point",
-          coordinates,
+          type: "Polygon",
+          coordinates: [coordinates],
         },
       },
     ],
@@ -193,69 +297,47 @@ function trackGeoJson(track: Array<[number, number]>): GeoJSON.FeatureCollection
   if (track.length < 2) {
     return emptyFeatureCollection();
   }
+
   return {
     type: "FeatureCollection",
     features: [
       {
         type: "Feature",
         properties: {},
-        geometry: { type: "LineString", coordinates: track },
+        geometry: {
+          type: "LineString",
+          coordinates: track,
+        },
       },
     ],
   };
 }
 
-function drawAircraftIcon(): ImageData {
-  const size = 96;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  if (ctx == undefined) {
-    throw new Error("Unable to create aircraft icon canvas");
+function polygonToFootprintCorners(
+  polygon: [number, number][] | undefined,
+): FootprintCorner[] {
+  if (polygon == undefined || polygon.length < 3) {
+    return [];
   }
 
-  ctx.clearRect(0, 0, size, size);
-  ctx.translate(size / 2, size / 2);
-  ctx.rotate(0);
+  const first = polygon[0];
+  const last = polygon[polygon.length - 1];
 
-  ctx.fillStyle = "rgba(17, 24, 39, 0.96)";
-  ctx.strokeStyle = "rgba(255, 204, 77, 1)";
-  ctx.lineWidth = 4;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
+  const points =
+    first != undefined &&
+    last != undefined &&
+    Math.abs(first[0] - last[0]) < 1e-12 &&
+    Math.abs(first[1] - last[1]) < 1e-12
+      ? polygon.slice(0, -1)
+      : polygon;
 
-  ctx.beginPath();
-  ctx.moveTo(0, -34);
-  ctx.lineTo(8, -12);
-  ctx.lineTo(22, -6);
-  ctx.lineTo(22, 4);
-  ctx.lineTo(6, 2);
-  ctx.lineTo(4, 18);
-  ctx.lineTo(14, 28);
-  ctx.lineTo(10, 34);
-  ctx.lineTo(0, 25);
-  ctx.lineTo(-10, 34);
-  ctx.lineTo(-14, 28);
-  ctx.lineTo(-4, 18);
-  ctx.lineTo(-6, 2);
-  ctx.lineTo(-22, 4);
-  ctx.lineTo(-22, -6);
-  ctx.lineTo(-8, -12);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.arc(0, 0, 30, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(255, 204, 77, 0.25)";
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  return ctx.getImageData(0, 0, size, size);
+  return points.slice(0, 4).map(([longitude, latitude]) => ({
+    longitude,
+    latitude,
+  }));
 }
 
-function createMap(container: HTMLDivElement): MapLibreMap {
+function createMap(container: HTMLDivElement, config: PanelConfig): MapLibreMap {
   return new maplibregl.Map({
     container,
     style: {
@@ -263,28 +345,40 @@ function createMap(container: HTMLDivElement): MapLibreMap {
       sources: {
         satellite: {
           type: "raster",
-          tiles: [DEFAULT_TILE_URL],
+          tiles: [config.tileUrl],
           tileSize: 256,
-          attribution: DEFAULT_ATTRIBUTION,
+          attribution: config.attribution,
           maxzoom: VIEW.maxZoom,
         },
       },
-      layers: [{ id: "satellite", type: "raster", source: "satellite" }],
+      layers: [
+        {
+          id: "satellite",
+          type: "raster",
+          source: "satellite",
+        },
+      ],
     },
     center: [27.992833, 53.706877],
-    zoom: 15,
+    zoom: VIEW.initialZoom,
     pitch: VIEW.mapPitchDeg,
     bearing: 0,
     attributionControl: false,
     maxZoom: VIEW.maxZoom,
     minZoom: VIEW.minZoom,
+    maxPitch: 80,
+    canvasContextAttributes: {
+      antialias: true,
+    },
   });
 }
 
-function installOverlayLayers(map: MapLibreMap): void {
-  map.addImage("aircraft-icon", drawAircraftIcon(), { pixelRatio: 2 });
+function installMapLayers(map: MapLibreMap): void {
+  map.addSource("track", {
+    type: "geojson",
+    data: emptyFeatureCollection(),
+  });
 
-  map.addSource("track", { type: "geojson", data: emptyFeatureCollection() });
   map.addLayer({
     id: "track-line",
     type: "line",
@@ -296,7 +390,11 @@ function installOverlayLayers(map: MapLibreMap): void {
     },
   });
 
-  map.addSource("footprint", { type: "geojson", data: emptyFeatureCollection() });
+  map.addSource("footprint", {
+    type: "geojson",
+    data: emptyFeatureCollection(),
+  });
+
   map.addLayer({
     id: "footprint-fill",
     type: "fill",
@@ -306,6 +404,7 @@ function installOverlayLayers(map: MapLibreMap): void {
       "fill-opacity": 0.18,
     },
   });
+
   map.addLayer({
     id: "footprint-outline",
     type: "line",
@@ -316,94 +415,259 @@ function installOverlayLayers(map: MapLibreMap): void {
       "line-opacity": 0.92,
     },
   });
+}
 
-  map.addSource("rays", { type: "geojson", data: emptyFeatureCollection() });
-  map.addLayer({
-    id: "rays-line",
-    type: "line",
-    source: "rays",
-    paint: {
-      "line-color": "#7edcff",
-      "line-width": 2,
-      "line-opacity": 0.65,
-    },
-  });
-
-  map.addSource("aircraft", { type: "geojson", data: emptyFeatureCollection() });
-  map.addLayer({
-    id: "aircraft-shadow",
-    type: "circle",
-    source: "aircraft",
-    paint: {
-      "circle-radius": 10,
-      "circle-color": "rgba(8, 14, 24, 0.55)",
-      "circle-stroke-color": "rgba(255, 204, 77, 0.25)",
-      "circle-stroke-width": 1.5,
-    },
-  });
-  map.addLayer({
-    id: "aircraft-icon-layer",
-    type: "symbol",
-    source: "aircraft",
-    layout: {
-      "icon-image": "aircraft-icon",
-      "icon-size": 0.45,
-      "icon-allow-overlap": true,
-      "icon-ignore-placement": true,
-      "icon-rotation-alignment": "map",
-      "icon-rotate": ["get", "heading"],
-    },
-  });
+function topicOptions(
+  topics: readonly Topic[],
+): Array<{
+  label: string;
+  value: string;
+}> {
+  return topics.map((topic) => ({
+    label: topic.name,
+    value: topic.name,
+  }));
 }
 
 function AdaptiveSatelliteMapPanel({ context }: PanelProps): ReactElement {
-  const initial = useMemo(() => ({ follow: true, autoZoom: true, ...((context.initialState ?? {}) as StoredState) }), [context.initialState]);
-  const [aircraft, setAircraft] = useState<AircraftState>();
-  const [follow, setFollow] = useState(initial.follow ?? true);
-  const [autoZoom, setAutoZoom] = useState(initial.autoZoom ?? true);
+  const initialConfig = useMemo(
+    () => ({
+      ...DEFAULT_CONFIG,
+      ...((context.initialState ?? {}) as PersistedState),
+    }),
+    [context.initialState],
+  );
+
+  const [config, setConfig] = useState<PanelConfig>(initialConfig);
+  const [messageState, setMessageState] = useState<MessageState>({});
+  const [topics, setTopics] = useState<readonly Topic[]>([]);
   const [mapReady, setMapReady] = useState(false);
-  const [error, setError] = useState<string>();
+  const [mapError, setMapError] = useState<string>();
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap>();
-  const aircraftRef = useRef<AircraftState>();
-  const followRef = useRef(follow);
-  const autoZoomRef = useRef(autoZoom);
-  const programmaticMoveRef = useRef(false);
+  const threeAircraftLayerRef = useRef<ThreeAircraftLayer>();
+
+  const configRef = useRef(config);
+  const messageStateRef = useRef(messageState);
+
   const trackRef = useRef<Array<[number, number]>>([]);
+  const lastFollowPointRef = useRef<[number, number]>();
+  const lastMessageTimeNsRef = useRef<bigint>();
   const renderDoneRef = useRef<(() => void) | undefined>();
 
   useEffect(() => {
-    aircraftRef.current = aircraft;
-  }, [aircraft]);
+    configRef.current = config;
+  }, [config]);
+
   useEffect(() => {
-    followRef.current = follow;
-  }, [follow]);
+    messageStateRef.current = messageState;
+  }, [messageState]);
+
+  const updateConfig = useCallback((patch: Partial<PanelConfig>) => {
+    setConfig((current) => {
+      const next = {
+        ...current,
+        ...patch,
+      };
+
+      configRef.current = next;
+
+      return next;
+    });
+  }, []);
+
+  const clearTrack = useCallback(() => {
+    trackRef.current = [];
+    lastFollowPointRef.current = undefined;
+
+    const map = mapRef.current;
+
+    if (map != undefined) {
+      source(map, "track")?.setData(emptyFeatureCollection());
+    }
+  }, []);
+
   useEffect(() => {
-    autoZoomRef.current = autoZoom;
-  }, [autoZoom]);
+    const options = topicOptions(topics);
+
+    context.updatePanelSettingsEditor({
+      nodes: {
+        topics: {
+          label: "Input topics",
+          fields: {
+            gpsTopic: {
+              label: "GPS",
+              input: "select",
+              value: config.gpsTopic,
+              options,
+            },
+            telemetryTopic: {
+              label: "Telemetry",
+              input: "select",
+              value: config.telemetryTopic,
+              options,
+            },
+            sceneTopic: {
+              label: "Scene footprint",
+              input: "select",
+              value: config.sceneTopic,
+              options,
+            },
+            poseTopic: {
+              label: "Aircraft pose",
+              input: "select",
+              value: config.poseTopic,
+              options,
+            },
+            originTopic: {
+              label: "World origin",
+              input: "select",
+              value: config.originTopic,
+              options,
+            },
+          },
+        },
+
+        camera: {
+          label: "Camera model",
+          fields: {
+            horizontalFovDeg: {
+              label: "Horizontal FOV, deg",
+              input: "number",
+              value: config.horizontalFovDeg,
+              min: 0.1,
+              max: 179,
+              step: 0.1,
+            },
+            verticalFovDeg: {
+              label: "Vertical FOV, deg",
+              input: "number",
+              value: config.verticalFovDeg,
+              min: 0.1,
+              max: 179,
+              step: 0.1,
+            },
+            headingOffsetDeg: {
+              label: "Heading offset, deg",
+              input: "number",
+              value: config.headingOffsetDeg,
+              step: 0.1,
+            },
+            preferSceneFootprint: {
+              label: "Prefer /scene footprint",
+              input: "boolean",
+              value: config.preferSceneFootprint,
+            },
+          },
+        },
+
+        map: {
+          label: "Map",
+          fields: {
+            tileUrl: {
+              label: "Raster tile URL",
+              input: "string",
+              value: config.tileUrl,
+            },
+            attribution: {
+              label: "Attribution",
+              input: "string",
+              value: config.attribution,
+            },
+          },
+        },
+      },
+
+      actionHandler: (action: SettingsTreeAction) => {
+        if (action.action !== "update") {
+          return;
+        }
+
+        const key = action.payload.path[
+          action.payload.path.length - 1
+        ] as keyof PanelConfig | undefined;
+
+        if (key == undefined) {
+          return;
+        }
+
+        updateConfig({
+          [key]: action.payload.value,
+        });
+      },
+    });
+  }, [config, context, topics, updateConfig]);
+
+  useEffect(() => {
+    context.subscribe(
+      [
+        config.gpsTopic,
+        config.telemetryTopic,
+        config.sceneTopic,
+        config.poseTopic,
+        config.originTopic,
+      ]
+        .filter(
+          (topic, index, all) =>
+            topic.length > 0 && all.indexOf(topic) === index,
+        )
+        .map((topic) => ({
+          topic,
+        })),
+    );
+  }, [
+    config.gpsTopic,
+    config.originTopic,
+    config.poseTopic,
+    config.sceneTopic,
+    config.telemetryTopic,
+    context,
+  ]);
 
   useLayoutEffect(() => {
     context.setDefaultPanelTitle("Adaptive Satellite Map");
+
     context.watch("currentFrame");
     context.watch("topics");
-    context.subscribe([
-      { topic: TOPICS.gps },
-      { topic: TOPICS.telemetry },
-      { topic: TOPICS.sceneLive },
-    ]);
 
     context.onRender = (renderState, done) => {
       renderDoneRef.current?.();
       renderDoneRef.current = done;
 
-      let next = aircraftRef.current;
+      if (renderState.topics != undefined) {
+        setTopics(renderState.topics);
+      }
+
+      let next = messageStateRef.current;
+      let newestTimeNs: bigint | undefined;
+
       for (const event of renderState.currentFrame ?? []) {
-        next = mergeMessage(next, event);
+        const timeNs = eventTimeNs(event);
+
+        if (
+          timeNs != undefined &&
+          (newestTimeNs == undefined || timeNs > newestTimeNs)
+        ) {
+          newestTimeNs = timeNs;
+        }
+
+        next = mergeMessage(next, event, configRef.current);
       }
-      if (next != undefined) {
-        setAircraft(next);
+
+      if (newestTimeNs != undefined) {
+        const previousTimeNs = lastMessageTimeNsRef.current;
+
+        if (previousTimeNs != undefined && newestTimeNs < previousTimeNs) {
+          clearTrack();
+        }
+
+        lastMessageTimeNsRef.current = newestTimeNs;
       }
+
+      messageStateRef.current = next;
+      setMessageState(next);
+
       done();
       renderDoneRef.current = undefined;
     };
@@ -413,123 +677,283 @@ function AdaptiveSatelliteMapPanel({ context }: PanelProps): ReactElement {
       renderDoneRef.current = undefined;
       context.unsubscribeAll();
     };
-  }, [context]);
+  }, [clearTrack, context]);
+
+  useEffect(() => {
+    context.saveState(config);
+  }, [config, context]);
 
   useEffect(() => {
     const container = mapContainerRef.current;
+
     if (container == undefined) {
       return;
     }
 
     setMapReady(false);
-    setError(undefined);
-    const map = createMap(container);
+    setMapError(undefined);
+
+    const map = createMap(container, configRef.current);
     mapRef.current = map;
 
     map.on("load", () => {
-      installOverlayLayers(map);
+      installMapLayers(map);
+
+      const aircraftLayer = new ThreeAircraftLayer();
+
+      threeAircraftLayerRef.current = aircraftLayer;
+      map.addLayer(aircraftLayer.asMapLibreLayer());
+
       setMapReady(true);
     });
-    map.on("error", (event) => {
-      setError(event.error?.message ?? "Map tile loading error");
-    });
-    map.on("dragstart", () => {
-      if (!programmaticMoveRef.current) {
-        setFollow(false);
-      }
-    });
-    map.on("zoomstart", (event) => {
-      if (!programmaticMoveRef.current && event.originalEvent != undefined) {
-        setAutoZoom(false);
-      }
-    });
-    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
-    map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
 
-    const resizeObserver = new ResizeObserver(() => map.resize());
+    map.on("error", (event) => {
+      const message = event.error?.message;
+
+      if (message != undefined) {
+        setMapError(message);
+      }
+    });
+
+    map.on("dragstart", () => {
+      if (configRef.current.follow) {
+        updateConfig({
+          follow: false,
+        });
+      }
+    });
+
+    map.on("rotatestart", (event) => {
+      if (event.originalEvent != undefined && configRef.current.follow) {
+        updateConfig({
+          follow: false,
+        });
+      }
+    });
+
+    map.addControl(
+      new maplibregl.NavigationControl({
+        showCompass: true,
+      }),
+      "top-right",
+    );
+
+    map.addControl(
+      new maplibregl.AttributionControl({
+        compact: true,
+      }),
+      "bottom-right",
+    );
+
+    const resizeObserver = new ResizeObserver(() => {
+      map.resize();
+    });
+
     resizeObserver.observe(container);
 
     return () => {
       resizeObserver.disconnect();
+
+      threeAircraftLayerRef.current = undefined;
+
       map.remove();
       mapRef.current = undefined;
     };
-  }, []);
+  }, [updateConfig]);
 
-  useEffect(() => {
-    context.saveState({ follow, autoZoom });
-  }, [autoZoom, context, follow]);
+  const aircraft = messageState.aircraft;
+
+  const heightM =
+    aircraft == undefined
+      ? undefined
+      : resolveHeightAboveWorldPlane(aircraft, messageState.origin);
+
+  const computedRelativeFootprint =
+    aircraft == undefined || heightM == undefined
+      ? undefined
+      : computeCameraFootprint(
+          heightM,
+          aircraft.headingDeg ?? 0,
+          aircraft.pitchDeg ?? 0,
+          aircraft.rollDeg ?? 0,
+          config.horizontalFovDeg,
+          config.verticalFovDeg,
+        );
+
+  const footprintPolygon =
+    config.preferSceneFootprint && aircraft?.sceneFootprintWorld != undefined
+      ? worldFootprintToLonLat(
+          messageState.origin,
+          aircraft.sceneFootprintWorld,
+        )
+      : aircraft == undefined
+        ? undefined
+        : relativeFootprintToLonLat(
+            aircraft,
+            computedRelativeFootprint,
+          );
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!mapReady || map == undefined || aircraft == undefined) {
+    const aircraftLayer = threeAircraftLayerRef.current;
+
+    if (
+      !mapReady ||
+      map == undefined ||
+      aircraftLayer == undefined ||
+      aircraft == undefined
+    ) {
       return;
     }
 
-    const aircraftPoint = aircraftLonLat(aircraft);
+    const point = aircraftLonLat(aircraft);
+
+    if (point == undefined) {
+      return;
+    }
+
+    const lastTrackPoint =
+      trackRef.current[trackRef.current.length - 1];
+
     if (
-      aircraftPoint != undefined &&
-      (trackRef.current.length === 0 ||
-        Math.abs(trackRef.current[trackRef.current.length - 1]![0] - aircraftPoint[0]) > 1e-8 ||
-        Math.abs(trackRef.current[trackRef.current.length - 1]![1] - aircraftPoint[1]) > 1e-8)
+      lastTrackPoint == undefined ||
+      haversineDistanceM(lastTrackPoint, point) >= VIEW.minimumMoveM
     ) {
-      trackRef.current.push(aircraftPoint);
-      if (trackRef.current.length > 10_000) {
-        trackRef.current.splice(0, trackRef.current.length - 10_000);
+      if (
+        lastTrackPoint != undefined &&
+        haversineDistanceM(lastTrackPoint, point) >
+          VIEW.trackTeleportThresholdM
+      ) {
+        trackRef.current = [];
+      }
+
+      trackRef.current.push(point);
+
+      if (trackRef.current.length > VIEW.maximumTrackPoints) {
+        trackRef.current.splice(
+          0,
+          trackRef.current.length - VIEW.maximumTrackPoints,
+        );
       }
     }
 
-    source(map, "aircraft")?.setData(aircraftGeoJson(aircraft));
-    const footprint = footprintGeoJson(aircraft);
     source(map, "footprint")?.setData(
-      footprint == undefined
-        ? emptyFeatureCollection()
-        : { type: "FeatureCollection", features: [footprint] },
+      polygonGeoJson(footprintPolygon),
     );
-    source(map, "rays")?.setData(raysGeoJson(aircraft));
-    source(map, "track")?.setData(trackGeoJson(trackRef.current));
 
-    if (follow) {
-      const container = map.getContainer();
-      const center = followCenter(aircraft) ?? aircraftPoint;
-      if (center != undefined) {
-        programmaticMoveRef.current = true;
-        map.easeTo({
-          center,
-          zoom: autoZoom ? desiredZoom(aircraft, container.clientWidth, container.clientHeight) : map.getZoom(),
-          bearing: 0,
-          pitch: VIEW.mapPitchDeg,
-          duration: 180,
-          essential: true,
-        });
-        window.setTimeout(() => {
-          programmaticMoveRef.current = false;
-        }, 220);
-      }
+    source(map, "track")?.setData(
+      trackGeoJson(trackRef.current),
+    );
+
+    aircraftLayer.setPose({
+      longitude: point[0],
+      latitude: point[1],
+      altitudeM: Math.max(0, heightM ?? aircraft.aglM ?? 0),
+      yawDeg: aircraft.headingDeg ?? 0,
+      pitchDeg: aircraft.pitchDeg ?? 0,
+      rollDeg: aircraft.rollDeg ?? 0,
+    });
+
+    aircraftLayer.setFootprint(
+      polygonToFootprintCorners(footprintPolygon),
+    );
+
+    if (!configRef.current.follow || map.isMoving()) {
+      return;
     }
-  }, [aircraft, autoZoom, follow, mapReady]);
+
+    const previousFollowPoint = lastFollowPointRef.current;
+
+    if (
+      previousFollowPoint != undefined &&
+      haversineDistanceM(previousFollowPoint, point) <
+        VIEW.minimumMoveM
+    ) {
+      return;
+    }
+
+    lastFollowPointRef.current = point;
+
+    map.easeTo({
+      center: point,
+      duration: VIEW.followDurationMs,
+      easing: (time) => time * time * (3 - 2 * time),
+      essential: true,
+    });
+  }, [
+    aircraft,
+    footprintPolygon,
+    heightM,
+    mapReady,
+  ]);
 
   return (
     <div className="asm-root">
-      <div ref={mapContainerRef} className="asm-map" />
+      <div
+        ref={mapContainerRef}
+        className="asm-map"
+      />
+
       <div className="asm-toolbar">
-        <button className={follow ? "active" : ""} onClick={() => setFollow(true)}>
+        <button
+          className={config.follow ? "active" : ""}
+          onClick={() => {
+            const nextFollow = !configRef.current.follow;
+
+            if (nextFollow) {
+              lastFollowPointRef.current = undefined;
+            }
+
+            updateConfig({
+              follow: nextFollow,
+            });
+          }}
+        >
           Follow
         </button>
-        <button className={autoZoom ? "active" : ""} onClick={() => setAutoZoom((value) => !value)}>
-          Auto zoom
-        </button>
       </div>
-      {aircraft == undefined && (
-        <div className="asm-center-message">Waiting for /input/gps, /input/telemetry and /scene/live</div>
+
+      <div className="asm-status">
+        <span>
+          ALT {aircraft?.altitudeM?.toFixed(1) ?? "—"} m
+        </span>
+
+        <span>
+          H {heightM?.toFixed(1) ?? "—"} m
+        </span>
+
+        <span>
+          Y/P/R {aircraft?.headingDeg?.toFixed(1) ?? "—"} /{" "}
+          {aircraft?.pitchDeg?.toFixed(1) ?? "—"} /{" "}
+          {aircraft?.rollDeg?.toFixed(1) ?? "—"}
+        </span>
+      </div>
+
+      {aircraft?.latitude == undefined && (
+        <div className="asm-center-message">
+          Waiting for the selected GPS and telemetry topics
+        </div>
       )}
-      {error != undefined && <div className="asm-error">{error}</div>}
+
+      {mapError != undefined && (
+        <div className="asm-error">
+          {mapError}
+        </div>
+      )}
     </div>
   );
 }
 
-export function initAdaptiveSatelliteMapPanel(context: PanelExtensionContext): () => void {
+export function initAdaptiveSatelliteMapPanel(
+  context: PanelExtensionContext,
+): () => void {
   const root = createRoot(context.panelElement);
-  root.render(<AdaptiveSatelliteMapPanel context={context} />);
-  return () => root.unmount();
+
+  root.render(
+    <AdaptiveSatelliteMapPanel context={context} />,
+  );
+
+  return () => {
+    root.unmount();
+  };
 }
