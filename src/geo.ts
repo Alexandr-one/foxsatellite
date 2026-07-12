@@ -1,57 +1,18 @@
-import { AircraftState, LocalPoint, WorldOrigin } from "./types";
+import {
+  AircraftState,
+  CAMERA_CONFIG,
+  LocalPoint,
+  WorldOrigin,
+} from "./types";
 
 const EARTH_RADIUS_M = 6_378_137;
 
-export function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value != undefined
-    ? (value as Record<string, unknown>)
-    : undefined;
+export function degreesToRadians(value: number): number {
+  return (value * Math.PI) / 180;
 }
 
-export function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-export function prop(object: unknown, ...keys: string[]): unknown {
-  const record = asRecord(object);
-
-  if (record == undefined) {
-    return undefined;
-  }
-
-  for (const key of keys) {
-    if (key in record) {
-      return record[key];
-    }
-  }
-
-  return undefined;
-}
-
-export function numberProp(
-  object: unknown,
-  ...keys: string[]
-): number | undefined {
-  const value = prop(object, ...keys);
-
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-
-  return undefined;
-}
-
-export function stringProp(
-  object: unknown,
-  ...keys: string[]
-): string | undefined {
-  const value = prop(object, ...keys);
-  return typeof value === "string" ? value : undefined;
+export function radiansToDegrees(value: number): number {
+  return (value * 180) / Math.PI;
 }
 
 export function normalizeHeadingDeg(
@@ -77,36 +38,37 @@ export function quaternionToEulerDeg(
     }
   | undefined {
   if (
-    [x, y, z, w].some(
-      (value) => value == undefined || !Number.isFinite(value),
-    )
+    x == undefined ||
+    y == undefined ||
+    z == undefined ||
+    w == undefined
   ) {
     return undefined;
   }
 
-  const qx = x!;
-  const qy = y!;
-  const qz = z!;
-  const qw = w!;
+  if (![x, y, z, w].every(Number.isFinite)) {
+    return undefined;
+  }
 
-  const sinRollCosPitch = 2 * (qw * qx + qy * qz);
-  const cosRollCosPitch = 1 - 2 * (qx * qx + qy * qy);
+  const sinRollCosPitch = 2 * (w * x + y * z);
+  const cosRollCosPitch = 1 - 2 * (x * x + y * y);
   const roll = Math.atan2(sinRollCosPitch, cosRollCosPitch);
 
-  const sinPitch = 2 * (qw * qy - qz * qx);
+  const sinPitch = 2 * (w * y - z * x);
+
   const pitch =
     Math.abs(sinPitch) >= 1
       ? Math.sign(sinPitch) * (Math.PI / 2)
       : Math.asin(sinPitch);
 
-  const sinYawCosPitch = 2 * (qw * qz + qx * qy);
-  const cosYawCosPitch = 1 - 2 * (qy * qy + qz * qz);
+  const sinYawCosPitch = 2 * (w * z + x * y);
+  const cosYawCosPitch = 1 - 2 * (y * y + z * z);
   const yaw = Math.atan2(sinYawCosPitch, cosYawCosPitch);
 
   return {
-    yawDeg: normalizeHeadingDeg((yaw * 180) / Math.PI) ?? 0,
-    pitchDeg: (pitch * 180) / Math.PI,
-    rollDeg: (roll * 180) / Math.PI,
+    yawDeg: normalizeHeadingDeg(radiansToDegrees(yaw)) ?? 0,
+    pitchDeg: radiansToDegrees(pitch),
+    rollDeg: radiansToDegrees(roll),
   };
 }
 
@@ -117,28 +79,31 @@ export function destination(
   distanceM: number,
 ): [number, number] {
   const angularDistance = distanceM / EARTH_RADIUS_M;
-  const bearing = (bearingDeg * Math.PI) / 180;
-  const lat1 = (latitudeDeg * Math.PI) / 180;
-  const lon1 = (longitudeDeg * Math.PI) / 180;
+  const bearing = degreesToRadians(bearingDeg);
+  const latitude1 = degreesToRadians(latitudeDeg);
+  const longitude1 = degreesToRadians(longitudeDeg);
 
-  const lat2 = Math.asin(
-    Math.sin(lat1) * Math.cos(angularDistance) +
-      Math.cos(lat1) *
+  const latitude2 = Math.asin(
+    Math.sin(latitude1) * Math.cos(angularDistance) +
+      Math.cos(latitude1) *
         Math.sin(angularDistance) *
         Math.cos(bearing),
   );
 
-  const lon2 =
-    lon1 +
+  const longitude2 =
+    longitude1 +
     Math.atan2(
       Math.sin(bearing) *
         Math.sin(angularDistance) *
-        Math.cos(lat1),
+        Math.cos(latitude1),
       Math.cos(angularDistance) -
-        Math.sin(lat1) * Math.sin(lat2),
+        Math.sin(latitude1) * Math.sin(latitude2),
     );
 
-  return [(lon2 * 180) / Math.PI, (lat2 * 180) / Math.PI];
+  return [
+    radiansToDegrees(longitude2),
+    radiansToDegrees(latitude2),
+  ];
 }
 
 export function enuOffsetToLonLat(
@@ -147,43 +112,110 @@ export function enuOffsetToLonLat(
   eastM: number,
   northM: number,
 ): [number, number] {
-  const distance = Math.hypot(eastM, northM);
+  const distanceM = Math.hypot(eastM, northM);
 
-  if (distance < 1e-9) {
+  if (distanceM < 1e-9) {
     return [longitudeDeg, latitudeDeg];
   }
 
-  const bearingDeg =
-    (Math.atan2(eastM, northM) * 180) / Math.PI;
+  const bearingDeg = radiansToDegrees(
+    Math.atan2(eastM, northM),
+  );
 
   return destination(
     latitudeDeg,
     longitudeDeg,
     bearingDeg,
-    distance,
+    distanceM,
   );
 }
 
 export function haversineDistanceM(
-  a: [number, number],
-  b: [number, number],
+  first: [number, number],
+  second: [number, number],
 ): number {
-  const lat1 = (a[1] * Math.PI) / 180;
-  const lat2 = (b[1] * Math.PI) / 180;
-  const dLat = lat2 - lat1;
-  const dLon = ((b[0] - a[0]) * Math.PI) / 180;
+  const latitude1 = degreesToRadians(first[1]);
+  const latitude2 = degreesToRadians(second[1]);
 
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) *
-      Math.cos(lat2) *
-      Math.sin(dLon / 2) ** 2;
+  const deltaLatitude = latitude2 - latitude1;
+  const deltaLongitude = degreesToRadians(
+    second[0] - first[0],
+  );
+
+  const value =
+    Math.sin(deltaLatitude / 2) ** 2 +
+    Math.cos(latitude1) *
+      Math.cos(latitude2) *
+      Math.sin(deltaLongitude / 2) ** 2;
 
   return (
     2 *
     EARTH_RADIUS_M *
-    Math.asin(Math.min(1, Math.sqrt(h)))
+    Math.asin(Math.min(1, Math.sqrt(value)))
   );
+}
+
+export function resolveAircraftLonLat(
+  aircraft: AircraftState,
+  origin: WorldOrigin | undefined,
+): [number, number] | undefined {
+  if (
+    origin != undefined &&
+    aircraft.localPosition != undefined
+  ) {
+    return enuOffsetToLonLat(
+      origin.latitude,
+      origin.longitude,
+      aircraft.localPosition.x,
+      aircraft.localPosition.y,
+    );
+  }
+
+  if (
+    aircraft.latitude != undefined &&
+    aircraft.longitude != undefined
+  ) {
+    return [
+      aircraft.longitude,
+      aircraft.latitude,
+    ];
+  }
+
+  return undefined;
+}
+
+export function resolveHeightAboveGround(
+  aircraft: AircraftState,
+  origin: WorldOrigin | undefined,
+): number | undefined {
+  if (
+    aircraft.localPosition != undefined &&
+    Number.isFinite(aircraft.localPosition.z) &&
+    aircraft.localPosition.z > 0
+  ) {
+    return aircraft.localPosition.z;
+  }
+
+  if (
+    aircraft.altitudeM != undefined &&
+    origin != undefined
+  ) {
+    const height =
+      aircraft.altitudeM - origin.altitudeM;
+
+    if (height > 0) {
+      return height;
+    }
+  }
+
+  if (
+    aircraft.aglM != undefined &&
+    aircraft.aglM > 0
+  ) {
+    return aircraft.aglM;
+  }
+
+  return undefined;
 }
 
 export function computeCameraFootprint(
@@ -191,8 +223,8 @@ export function computeCameraFootprint(
   yawDeg: number,
   pitchDeg: number,
   rollDeg: number,
-  horizontalFovDeg: number,
-  verticalFovDeg: number,
+  horizontalFovDeg = CAMERA_CONFIG.horizontalFovDeg,
+  verticalFovDeg = CAMERA_CONFIG.verticalFovDeg,
 ): LocalPoint[] | undefined {
   if (
     !Number.isFinite(heightM) ||
@@ -205,54 +237,53 @@ export function computeCameraFootprint(
     return undefined;
   }
 
-  const halfWidth = Math.tan(
-    (horizontalFovDeg * Math.PI) / 360,
+  const horizontalHalf = Math.tan(
+    degreesToRadians(horizontalFovDeg / 2),
   );
 
-  const halfHeight = Math.tan(
-    (verticalFovDeg * Math.PI) / 360,
+  const verticalHalf = Math.tan(
+    degreesToRadians(verticalFovDeg / 2),
   );
 
-  const raysBody = [
+  const bodyRays = [
     {
-      x: halfHeight,
-      y: -halfWidth,
+      x: verticalHalf,
+      y: -horizontalHalf,
       z: 1,
     },
     {
-      x: halfHeight,
-      y: halfWidth,
+      x: verticalHalf,
+      y: horizontalHalf,
       z: 1,
     },
     {
-      x: -halfHeight,
-      y: halfWidth,
+      x: -verticalHalf,
+      y: horizontalHalf,
       z: 1,
     },
     {
-      x: -halfHeight,
-      y: -halfWidth,
+      x: -verticalHalf,
+      y: -horizontalHalf,
       z: 1,
     },
   ];
 
-  const yaw = (yawDeg * Math.PI) / 180;
-  const pitch = (pitchDeg * Math.PI) / 180;
-  const roll = (rollDeg * Math.PI) / 180;
+  const yaw = degreesToRadians(yawDeg);
+  const pitch = degreesToRadians(pitchDeg);
+  const roll = degreesToRadians(rollDeg);
 
   const cy = Math.cos(yaw);
   const sy = Math.sin(yaw);
+
   const cp = Math.cos(pitch);
   const sp = Math.sin(pitch);
+
   const cr = Math.cos(roll);
   const sr = Math.sin(roll);
 
   const result: LocalPoint[] = [];
 
-  for (const ray of raysBody) {
-    /*
-     * Поворот body FRD -> world NED.
-     */
+  for (const ray of bodyRays) {
     const north =
       cp * cy * ray.x +
       (sr * sp * cy - cr * sy) * ray.y +
@@ -283,47 +314,30 @@ export function computeCameraFootprint(
   return result;
 }
 
-export function resolveHeightAboveWorldPlane(
-  state: AircraftState,
-  origin: WorldOrigin | undefined,
-): number | undefined {
-  if (
-    state.localPosition?.z != undefined &&
-    state.localPosition.z > 0
-  ) {
-    return state.localPosition.z;
-  }
-
-  if (
-    state.altitudeM != undefined &&
-    origin != undefined
-  ) {
-    const height = state.altitudeM - origin.altitudeM;
-    return height > 0 ? height : undefined;
-  }
-
-  return state.aglM != undefined && state.aglM > 0
-    ? state.aglM
-    : undefined;
-}
-
 export function relativeFootprintToLonLat(
-  state: AircraftState,
+  aircraft: AircraftState,
+  origin: WorldOrigin | undefined,
   points: LocalPoint[] | undefined,
 ): [number, number][] | undefined {
+  const aircraftPoint = resolveAircraftLonLat(
+    aircraft,
+    origin,
+  );
+
   if (
-    state.latitude == undefined ||
-    state.longitude == undefined ||
+    aircraftPoint == undefined ||
     points == undefined ||
     points.length < 3
   ) {
     return undefined;
   }
 
+  const [longitude, latitude] = aircraftPoint;
+
   const coordinates = points.map((point) =>
     enuOffsetToLonLat(
-      state.latitude!,
-      state.longitude!,
+      latitude,
+      longitude,
       point.x,
       point.y,
     ),

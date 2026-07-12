@@ -2,540 +2,50 @@ import maplibregl, {
   CustomLayerInterface,
   Map as MapLibreMap,
 } from "maplibre-gl";
+
 import * as THREE from "three";
 
-export type Aircraft3DPose = {
-  longitude: number;
-  latitude: number;
-  altitudeM: number;
-  yawDeg: number;
-  pitchDeg: number;
-  rollDeg: number;
-};
+import {
+  createAircraftModel,
+} from "./aircraftModel";
 
-export type FootprintCorner = {
-  longitude: number;
-  latitude: number;
-};
+import {
+  AircraftMapPose,
+  FootprintCorner,
+} from "./types";
 
-type MapLibreRenderArguments = {
+type RenderArguments = {
   defaultProjectionData?: {
     mainMatrix?: ArrayLike<number>;
   };
+
   projectionMatrix?: ArrayLike<number>;
+
   modelViewProjectionMatrix?: ArrayLike<number>;
 };
 
-const AIRCRAFT_LAYER_ID = "aircraft-3d-layer";
+const LAYER_ID =
+  "adaptive-aircraft-3d-layer";
 
-const MODEL_LENGTH_M = 42;
-const MODEL_WINGSPAN_M = 48;
-const MODEL_HEIGHT_M = 9;
+const MAX_RAYS = 4;
 
-const MODEL_VISUAL_SCALE = 1.8;
-
-function degreesToRadians(value: number): number {
+function degreesToRadians(
+  value: number,
+): number {
   return (value * Math.PI) / 180;
 }
 
-function createMaterial(
-  color: THREE.ColorRepresentation,
-  roughness = 0.62,
-  metalness = 0.1,
-): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
-    color,
-    roughness,
-    metalness,
-    side: THREE.DoubleSide,
-  });
-}
-
-function createWingGeometry(
-  spanM: number,
-  rootChordM: number,
-  tipChordM: number,
-  thicknessM: number,
-): THREE.BufferGeometry {
-  const halfSpan = spanM / 2;
-  const rootFront = rootChordM * 0.42;
-  const rootBack = -rootChordM * 0.58;
-  const tipFront = tipChordM * 0.36;
-  const tipBack = -tipChordM * 0.64;
-  const halfThickness = thicknessM / 2;
-
-  const vertices = new Float32Array([
-    0,
-    rootFront,
-    halfThickness,
-    halfSpan,
-    tipFront,
-    halfThickness,
-    halfSpan,
-    tipBack,
-    halfThickness,
-
-    0,
-    rootFront,
-    halfThickness,
-    halfSpan,
-    tipBack,
-    halfThickness,
-    0,
-    rootBack,
-    halfThickness,
-
-    0,
-    rootFront,
-    halfThickness,
-    0,
-    rootBack,
-    halfThickness,
-    -halfSpan,
-    tipBack,
-    halfThickness,
-
-    0,
-    rootFront,
-    halfThickness,
-    -halfSpan,
-    tipBack,
-    halfThickness,
-    -halfSpan,
-    tipFront,
-    halfThickness,
-
-    0,
-    rootFront,
-    -halfThickness,
-    halfSpan,
-    tipBack,
-    -halfThickness,
-    halfSpan,
-    tipFront,
-    -halfThickness,
-
-    0,
-    rootFront,
-    -halfThickness,
-    0,
-    rootBack,
-    -halfThickness,
-    halfSpan,
-    tipBack,
-    -halfThickness,
-
-    0,
-    rootFront,
-    -halfThickness,
-    -halfSpan,
-    tipBack,
-    -halfThickness,
-    0,
-    rootBack,
-    -halfThickness,
-
-    0,
-    rootFront,
-    -halfThickness,
-    -halfSpan,
-    tipFront,
-    -halfThickness,
-    -halfSpan,
-    tipBack,
-    -halfThickness,
-
-    0,
-    rootFront,
-    halfThickness,
-    0,
-    rootFront,
-    -halfThickness,
-    halfSpan,
-    tipFront,
-    -halfThickness,
-
-    0,
-    rootFront,
-    halfThickness,
-    halfSpan,
-    tipFront,
-    -halfThickness,
-    halfSpan,
-    tipFront,
-    halfThickness,
-
-    0,
-    rootBack,
-    halfThickness,
-    halfSpan,
-    tipBack,
-    halfThickness,
-    halfSpan,
-    tipBack,
-    -halfThickness,
-
-    0,
-    rootBack,
-    halfThickness,
-    halfSpan,
-    tipBack,
-    -halfThickness,
-    0,
-    rootBack,
-    -halfThickness,
-
-    0,
-    rootFront,
-    halfThickness,
-    -halfSpan,
-    tipFront,
-    -halfThickness,
-    0,
-    rootFront,
-    -halfThickness,
-
-    0,
-    rootFront,
-    halfThickness,
-    -halfSpan,
-    tipFront,
-    halfThickness,
-    -halfSpan,
-    tipFront,
-    -halfThickness,
-
-    0,
-    rootBack,
-    halfThickness,
-    -halfSpan,
-    tipBack,
-    -halfThickness,
-    -halfSpan,
-    tipBack,
-    halfThickness,
-
-    0,
-    rootBack,
-    halfThickness,
-    0,
-    rootBack,
-    -halfThickness,
-    -halfSpan,
-    tipBack,
-    -halfThickness,
-  ]);
-
-  const geometry = new THREE.BufferGeometry();
-
-  geometry.setAttribute(
-    "position",
-    new THREE.BufferAttribute(vertices, 3),
-  );
-
-  geometry.computeVertexNormals();
-
-  return geometry;
-}
-
-function createVerticalTailGeometry(): THREE.BufferGeometry {
-  const halfThickness = 0.5;
-
-  const vertices = new Float32Array([
-    halfThickness,
-    -13,
-    0,
-    halfThickness,
-    -17,
-    0,
-    halfThickness,
-    -16,
-    7,
-
-    -halfThickness,
-    -13,
-    0,
-    -halfThickness,
-    -16,
-    7,
-    -halfThickness,
-    -17,
-    0,
-
-    halfThickness,
-    -13,
-    0,
-    -halfThickness,
-    -13,
-    0,
-    -halfThickness,
-    -16,
-    7,
-
-    halfThickness,
-    -13,
-    0,
-    -halfThickness,
-    -16,
-    7,
-    halfThickness,
-    -16,
-    7,
-
-    halfThickness,
-    -17,
-    0,
-    halfThickness,
-    -16,
-    7,
-    -halfThickness,
-    -16,
-    7,
-
-    halfThickness,
-    -17,
-    0,
-    -halfThickness,
-    -16,
-    7,
-    -halfThickness,
-    -17,
-    0,
-
-    halfThickness,
-    -13,
-    0,
-    halfThickness,
-    -17,
-    0,
-    -halfThickness,
-    -17,
-    0,
-
-    halfThickness,
-    -13,
-    0,
-    -halfThickness,
-    -17,
-    0,
-    -halfThickness,
-    -13,
-    0,
-  ]);
-
-  const geometry = new THREE.BufferGeometry();
-
-  geometry.setAttribute(
-    "position",
-    new THREE.BufferAttribute(vertices, 3),
-  );
-
-  geometry.computeVertexNormals();
-
-  return geometry;
-}
-
-function createAircraftModel(): THREE.Group {
-  const aircraft = new THREE.Group();
-
-  const bodyMaterial = createMaterial("#d7dce3", 0.5, 0.24);
-  const wingMaterial = createMaterial("#b8c2cf", 0.55, 0.18);
-  const darkMaterial = createMaterial("#303b49", 0.38, 0.3);
-  const engineMaterial = createMaterial("#4c5968", 0.46, 0.42);
-  const windowMaterial = new THREE.MeshStandardMaterial({
-    color: "#174b78",
-    roughness: 0.16,
-    metalness: 0.25,
-    transparent: true,
-    opacity: 0.88,
-  });
-
-  const fuselageGeometry = new THREE.CylinderGeometry(
-    MODEL_HEIGHT_M * 0.28,
-    MODEL_HEIGHT_M * 0.38,
-    MODEL_LENGTH_M * 0.76,
-    24,
-    1,
-    false,
-  );
-
-  const fuselage = new THREE.Mesh(
-    fuselageGeometry,
-    bodyMaterial,
-  );
-
-  fuselage.position.y = -1;
-  fuselage.castShadow = true;
-  aircraft.add(fuselage);
-
-  const nose = new THREE.Mesh(
-    new THREE.ConeGeometry(
-      MODEL_HEIGHT_M * 0.28,
-      MODEL_LENGTH_M * 0.24,
-      24,
-    ),
-    bodyMaterial,
-  );
-
-  nose.position.y = MODEL_LENGTH_M * 0.5 - 0.6;
-  nose.castShadow = true;
-  aircraft.add(nose);
-
-  const tailCone = new THREE.Mesh(
-    new THREE.ConeGeometry(
-      MODEL_HEIGHT_M * 0.37,
-      MODEL_LENGTH_M * 0.18,
-      24,
-    ),
-    bodyMaterial,
-  );
-
-  tailCone.rotation.z = Math.PI;
-  tailCone.position.y = -MODEL_LENGTH_M * 0.47;
-  tailCone.castShadow = true;
-  aircraft.add(tailCone);
-
-  const wings = new THREE.Mesh(
-    createWingGeometry(
-      MODEL_WINGSPAN_M,
-      11,
-      4.4,
-      0.85,
-    ),
-    wingMaterial,
-  );
-
-  wings.position.y = -1.5;
-  wings.position.z = 0.1;
-  wings.castShadow = true;
-  aircraft.add(wings);
-
-  const stabilizer = new THREE.Mesh(
-    createWingGeometry(
-      17,
-      5.5,
-      2.3,
-      0.55,
-    ),
-    wingMaterial,
-  );
-
-  stabilizer.position.y = -15;
-  stabilizer.position.z = 1.4;
-  stabilizer.castShadow = true;
-  aircraft.add(stabilizer);
-
-  const verticalTail = new THREE.Mesh(
-    createVerticalTailGeometry(),
-    wingMaterial,
-  );
-
-  verticalTail.castShadow = true;
-  aircraft.add(verticalTail);
-
-  const cockpit = new THREE.Mesh(
-    new THREE.SphereGeometry(3.1, 20, 12),
-    windowMaterial,
-  );
-
-  cockpit.scale.set(0.72, 1.35, 0.55);
-  cockpit.position.set(0, 11.5, 2.15);
-  cockpit.castShadow = true;
-  aircraft.add(cockpit);
-
-  const engineGeometry = new THREE.CylinderGeometry(
-    1.65,
-    1.9,
-    5.8,
-    20,
-  );
-
-  for (const x of [-9.5, 9.5]) {
-    const engine = new THREE.Mesh(
-      engineGeometry,
-      engineMaterial,
-    );
-
-    engine.position.set(x, 0.7, -1.8);
-    engine.castShadow = true;
-    aircraft.add(engine);
-
-    const intake = new THREE.Mesh(
-      new THREE.TorusGeometry(1.7, 0.22, 10, 24),
-      darkMaterial,
-    );
-
-    intake.rotation.x = Math.PI / 2;
-    intake.position.set(x, 3.65, -1.8);
-    aircraft.add(intake);
-  }
-
-  const lightGeometry = new THREE.SphereGeometry(0.65, 12, 8);
-
-  const leftLight = new THREE.Mesh(
-    lightGeometry,
-    new THREE.MeshBasicMaterial({ color: "#ff3030" }),
-  );
-
-  leftLight.position.set(
-    -MODEL_WINGSPAN_M / 2,
-    -2.8,
-    0.2,
-  );
-
-  aircraft.add(leftLight);
-
-  const rightLight = new THREE.Mesh(
-    lightGeometry,
-    new THREE.MeshBasicMaterial({ color: "#20ff75" }),
-  );
-
-  rightLight.position.set(
-    MODEL_WINGSPAN_M / 2,
-    -2.8,
-    0.2,
-  );
-
-  aircraft.add(rightLight);
-
-  aircraft.traverse((object) => {
-    if (!(object instanceof THREE.Mesh)) {
-      return;
-    }
-
-    const edges = new THREE.EdgesGeometry(object.geometry, 28);
-
-    const outline = new THREE.LineSegments(
-      edges,
-      new THREE.LineBasicMaterial({
-        color: "#17202b",
-        transparent: true,
-        opacity: 0.42,
-      }),
-    );
-
-    object.add(outline);
-  });
-
-  aircraft.scale.setScalar(MODEL_VISUAL_SCALE);
-
-  return aircraft;
-}
-
-function matrixFromUnknownArguments(
+function projectionMatrixFromArguments(
   firstArgument: unknown,
   secondArgument: unknown,
 ): ArrayLike<number> | undefined {
-  /*
-   * MapLibre 5: render(gl, args)
-   */
-  const modernArguments =
-    secondArgument as MapLibreRenderArguments | undefined;
+  const modern =
+    secondArgument as RenderArguments | undefined;
 
   const modernMatrix =
-    modernArguments?.defaultProjectionData?.mainMatrix ??
-    modernArguments?.projectionMatrix ??
-    modernArguments?.modelViewProjectionMatrix;
+    modern?.defaultProjectionData?.mainMatrix ??
+    modern?.projectionMatrix ??
+    modern?.modelViewProjectionMatrix;
 
   if (modernMatrix != undefined) {
     return modernMatrix;
@@ -549,49 +59,182 @@ function matrixFromUnknownArguments(
     return secondArgument as ArrayLike<number>;
   }
 
-  const singleArgument =
-    firstArgument as MapLibreRenderArguments | undefined;
+  const legacy =
+    firstArgument as RenderArguments | undefined;
 
   return (
-    singleArgument?.defaultProjectionData?.mainMatrix ??
-    singleArgument?.projectionMatrix ??
-    singleArgument?.modelViewProjectionMatrix
+    legacy?.defaultProjectionData?.mainMatrix ??
+    legacy?.projectionMatrix ??
+    legacy?.modelViewProjectionMatrix
   );
 }
 
 export class ThreeAircraftLayer {
-  public readonly id = AIRCRAFT_LAYER_ID;
-  public readonly type = "custom" as const;
-  public readonly renderingMode = "3d" as const;
+  public readonly id = LAYER_ID;
 
-  private map: MapLibreMap | undefined;
-  private renderer: THREE.WebGLRenderer | undefined;
-  private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.Camera();
-  private readonly root = new THREE.Group();
-  private readonly aircraft = createAircraftModel();
+  public readonly type =
+    "custom" as const;
 
-  private pose: Aircraft3DPose | undefined;
-  private footprint: FootprintCorner[] = [];
+  public readonly renderingMode =
+    "3d" as const;
 
-  private raysGeometry: THREE.BufferGeometry | undefined;
-  private rays: THREE.LineSegments | undefined;
+  private map:
+    | MapLibreMap
+    | undefined;
+
+  private renderer:
+    | THREE.WebGLRenderer
+    | undefined;
+
+  private readonly scene =
+    new THREE.Scene();
+
+  private readonly camera =
+    new THREE.Camera();
+
+  private readonly aircraftRoot =
+    new THREE.Group();
+
+  private readonly aircraftModel =
+    createAircraftModel();
+
+  private pose:
+    | AircraftMapPose
+    | undefined;
+
+  private footprint:
+    FootprintCorner[] = [];
+
+  private readonly rayPositions =
+    new Float32Array(
+      MAX_RAYS * 2 * 3,
+    );
+
+  private readonly rayGeometry =
+    new THREE.BufferGeometry();
+
+  private readonly rayMaterial =
+    new THREE.LineBasicMaterial({
+      color: "#67d9ff",
+      transparent: true,
+      opacity: 0.72,
+      depthTest: true,
+      depthWrite: false,
+    });
+
+  private readonly rays =
+    new THREE.LineSegments(
+      this.rayGeometry,
+      this.rayMaterial,
+    );
+
+  private readonly dropPositions =
+    new Float32Array(6);
+
+  private readonly dropGeometry =
+    new THREE.BufferGeometry();
+
+  private readonly dropMaterial =
+    new THREE.LineBasicMaterial({
+      color: "#45d9ff",
+      transparent: true,
+      opacity: 0.95,
+      depthTest: true,
+      depthWrite: false,
+    });
+
+  private readonly dropLine =
+    new THREE.LineSegments(
+      this.dropGeometry,
+      this.dropMaterial,
+    );
 
   public constructor() {
-    this.root.matrixAutoUpdate = false;
-    this.root.add(this.aircraft);
-    this.scene.add(this.root);
+    this.aircraftRoot.matrixAutoUpdate =
+      false;
 
-    const ambientLight = new THREE.AmbientLight("#ffffff", 1.45);
-    this.scene.add(ambientLight);
+    this.aircraftRoot.add(
+      this.aircraftModel,
+    );
 
-    const sunLight = new THREE.DirectionalLight("#ffffff", 2.2);
-    sunLight.position.set(-300, -180, 650);
-    this.scene.add(sunLight);
+    this.scene.add(
+      this.aircraftRoot,
+    );
 
-    const fillLight = new THREE.DirectionalLight("#89bfff", 0.65);
-    fillLight.position.set(250, 180, 160);
-    this.scene.add(fillLight);
+    this.rayGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(
+        this.rayPositions,
+        3,
+      ),
+    );
+
+    this.rayGeometry.setDrawRange(
+      0,
+      0,
+    );
+
+    this.rays.frustumCulled =
+      false;
+
+    this.scene.add(this.rays);
+
+    this.dropGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(
+        this.dropPositions,
+        3,
+      ),
+    );
+
+    this.dropGeometry.setDrawRange(
+      0,
+      0,
+    );
+
+    this.dropLine.frustumCulled =
+      false;
+
+    this.scene.add(
+      this.dropLine,
+    );
+
+    const hemisphere =
+      new THREE.HemisphereLight(
+        "#f4f8ff",
+        "#25303d",
+        1.8,
+      );
+
+    this.scene.add(hemisphere);
+
+    const sun =
+      new THREE.DirectionalLight(
+        "#ffffff",
+        2.25,
+      );
+
+    sun.position.set(
+      -200,
+      -120,
+      420,
+    );
+
+    this.scene.add(sun);
+
+    const fill =
+      new THREE.DirectionalLight(
+        "#93c7ff",
+        0.65,
+      );
+
+    fill.position.set(
+      180,
+      120,
+      120,
+    );
+
+    this.scene.add(fill);
   }
 
   public asMapLibreLayer(): CustomLayerInterface {
@@ -600,52 +243,83 @@ export class ThreeAircraftLayer {
 
   public onAdd(
     map: MapLibreMap,
-    gl: WebGLRenderingContext | WebGL2RenderingContext,
+    gl:
+      | WebGLRenderingContext
+      | WebGL2RenderingContext,
   ): void {
     this.map = map;
 
-    this.renderer = new THREE.WebGLRenderer({
-      canvas: map.getCanvas(),
-      context: gl,
-      antialias: true,
-    });
+    this.renderer =
+      new THREE.WebGLRenderer({
+        canvas: map.getCanvas(),
+        context: gl,
+        antialias: true,
+      });
 
-    this.renderer.autoClear = false;
+    this.renderer.autoClear =
+      false;
+
+    this.renderer.outputColorSpace =
+      THREE.SRGBColorSpace;
   }
 
   public onRemove(): void {
-    this.disposeRays();
-
-    this.aircraft.traverse((object) => {
-      if (!(object instanceof THREE.Mesh)) {
-        return;
-      }
-
-      object.geometry.dispose();
-
-      if (Array.isArray(object.material)) {
-        for (const material of object.material) {
-          material.dispose();
+    this.aircraftModel.traverse(
+      (object) => {
+        if (
+          !(object instanceof THREE.Mesh)
+        ) {
+          return;
         }
-      } else {
-        object.material.dispose();
-      }
-    });
+
+        object.geometry.dispose();
+
+        if (
+          Array.isArray(object.material)
+        ) {
+          for (
+            const material of object.material
+          ) {
+            material.dispose();
+          }
+        } else {
+          object.material.dispose();
+        }
+      },
+    );
+
+    this.rayGeometry.dispose();
+    this.rayMaterial.dispose();
+
+    this.dropGeometry.dispose();
+    this.dropMaterial.dispose();
+
+    this.renderer?.dispose();
 
     this.renderer = undefined;
     this.map = undefined;
   }
 
-  public setPose(pose: Aircraft3DPose | undefined): void {
+  public setPose(
+    pose: AircraftMapPose | undefined,
+  ): void {
     this.pose = pose;
-    this.updateTransform();
+
+    this.updateAircraftTransform();
     this.updateRays();
+    this.updateDropLine();
+
     this.map?.triggerRepaint();
   }
 
-  public setFootprint(corners: FootprintCorner[]): void {
-    this.footprint = corners.slice(0, 4);
+  public setFootprint(
+    corners: FootprintCorner[],
+  ): void {
+    this.footprint =
+      corners.slice(0, MAX_RAYS);
+
     this.updateRays();
+
     this.map?.triggerRepaint();
   }
 
@@ -660,161 +334,238 @@ export class ThreeAircraftLayer {
       return;
     }
 
-    const projectionMatrix = matrixFromUnknownArguments(
-      firstArgument,
-      secondArgument,
-    );
+    const projection =
+      projectionMatrixFromArguments(
+        firstArgument,
+        secondArgument,
+      );
 
-    if (projectionMatrix == undefined) {
+    if (projection == undefined) {
       return;
     }
 
     this.camera.projectionMatrix.fromArray(
-      Array.from(projectionMatrix),
+      Array.from(projection),
     );
 
     this.renderer.resetState();
-    this.renderer.render(this.scene, this.camera);
+
+    this.renderer.render(
+      this.scene,
+      this.camera,
+    );
   }
 
-  private updateTransform(): void {
+  private updateAircraftTransform(): void {
     const pose = this.pose;
 
     if (pose == undefined) {
       return;
     }
 
-    const mercator =
+    const coordinate =
       maplibregl.MercatorCoordinate.fromLngLat(
-        [pose.longitude, pose.latitude],
-        pose.altitudeM,
+        [
+          pose.longitude,
+          pose.latitude,
+        ],
+        pose.heightM,
       );
 
     const unitsPerMeter =
-      mercator.meterInMercatorCoordinateUnits();
+      coordinate.meterInMercatorCoordinateUnits();
 
-    const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(
-      new THREE.Vector3(0, 0, 1),
-      -degreesToRadians(pose.yawDeg),
-    );
+    const yaw =
+      new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, 1),
+        -degreesToRadians(
+          pose.headingDeg,
+        ),
+      );
 
-    const pitchQuaternion =
+    const pitch =
       new THREE.Quaternion().setFromAxisAngle(
         new THREE.Vector3(1, 0, 0),
-        degreesToRadians(pose.pitchDeg),
+        degreesToRadians(
+          pose.pitchDeg,
+        ),
       );
 
-    const rollQuaternion =
+    const roll =
       new THREE.Quaternion().setFromAxisAngle(
         new THREE.Vector3(0, 1, 0),
-        degreesToRadians(pose.rollDeg),
+        degreesToRadians(
+          pose.rollDeg,
+        ),
       );
 
-    const orientation = yawQuaternion
-      .clone()
-      .multiply(pitchQuaternion)
-      .multiply(rollQuaternion);
+    const orientation =
+      yaw
+        .clone()
+        .multiply(pitch)
+        .multiply(roll);
 
-    const translation = new THREE.Matrix4().makeTranslation(
-      mercator.x,
-      mercator.y,
-      mercator.z,
-    );
+    const translation =
+      new THREE.Matrix4().makeTranslation(
+        coordinate.x,
+        coordinate.y,
+        coordinate.z,
+      );
 
-    const mercatorScale = new THREE.Matrix4().makeScale(
-      unitsPerMeter,
-      -unitsPerMeter,
-      unitsPerMeter,
-    );
+    const scale =
+      new THREE.Matrix4().makeScale(
+        unitsPerMeter,
+        -unitsPerMeter,
+        unitsPerMeter,
+      );
 
-    const rotation = new THREE.Matrix4().makeRotationFromQuaternion(
-      orientation,
-    );
+    const rotation =
+      new THREE.Matrix4().makeRotationFromQuaternion(
+        orientation,
+      );
 
-    this.root.matrix
+    this.aircraftRoot.matrix
       .identity()
       .multiply(translation)
-      .multiply(mercatorScale)
+      .multiply(scale)
       .multiply(rotation);
 
-    this.root.matrixWorldNeedsUpdate = true;
+    this.aircraftRoot.matrixWorldNeedsUpdate =
+      true;
   }
 
   private updateRays(): void {
     const pose = this.pose;
 
-    this.disposeRays();
-
     if (
       pose == undefined ||
       this.footprint.length < 3
     ) {
+      this.rayGeometry.setDrawRange(
+        0,
+        0,
+      );
+
       return;
     }
 
-    const aircraftMercator =
+    const aircraftCoordinate =
       maplibregl.MercatorCoordinate.fromLngLat(
-        [pose.longitude, pose.latitude],
-        pose.altitudeM,
+        [
+          pose.longitude,
+          pose.latitude,
+        ],
+        pose.heightM,
       );
 
-    const vertices: number[] = [];
+    let cursor = 0;
 
-    for (const corner of this.footprint.slice(0, 4)) {
-      const groundMercator =
+    for (
+      const corner of this.footprint
+    ) {
+      const groundCoordinate =
         maplibregl.MercatorCoordinate.fromLngLat(
-          [corner.longitude, corner.latitude],
+          [
+            corner.longitude,
+            corner.latitude,
+          ],
           0,
         );
 
-      vertices.push(
-        aircraftMercator.x,
-        aircraftMercator.y,
-        aircraftMercator.z,
-        groundMercator.x,
-        groundMercator.y,
-        groundMercator.z,
-      );
+      this.rayPositions[cursor++] =
+        aircraftCoordinate.x;
+
+      this.rayPositions[cursor++] =
+        aircraftCoordinate.y;
+
+      this.rayPositions[cursor++] =
+        aircraftCoordinate.z;
+
+      this.rayPositions[cursor++] =
+        groundCoordinate.x;
+
+      this.rayPositions[cursor++] =
+        groundCoordinate.y;
+
+      this.rayPositions[cursor++] =
+        groundCoordinate.z;
     }
 
-    this.raysGeometry = new THREE.BufferGeometry();
+    const attribute =
+      this.rayGeometry.getAttribute(
+        "position",
+      ) as THREE.BufferAttribute;
 
-    this.raysGeometry.setAttribute(
-      "position",
-      new THREE.Float32BufferAttribute(vertices, 3),
+    attribute.needsUpdate = true;
+
+    this.rayGeometry.setDrawRange(
+      0,
+      this.footprint.length * 2,
     );
 
-    this.rays = new THREE.LineSegments(
-      this.raysGeometry,
-      new THREE.LineBasicMaterial({
-        color: "#64d8ff",
-        transparent: true,
-        opacity: 0.84,
-        depthTest: true,
-      }),
-    );
-
-    this.scene.add(this.rays);
+    this.rayGeometry.computeBoundingSphere();
   }
 
-  private disposeRays(): void {
-    if (this.rays != undefined) {
-      this.scene.remove(this.rays);
+  private updateDropLine(): void {
+    const pose = this.pose;
 
-      const material = this.rays.material;
+    if (pose == undefined) {
+      this.dropGeometry.setDrawRange(
+        0,
+        0,
+      );
 
-      if (Array.isArray(material)) {
-        for (const item of material) {
-          item.dispose();
-        }
-      } else {
-        material.dispose();
-      }
+      return;
     }
 
-    this.raysGeometry?.dispose();
+    const aircraftCoordinate =
+      maplibregl.MercatorCoordinate.fromLngLat(
+        [
+          pose.longitude,
+          pose.latitude,
+        ],
+        pose.heightM,
+      );
 
-    this.rays = undefined;
-    this.raysGeometry = undefined;
+    const groundCoordinate =
+      maplibregl.MercatorCoordinate.fromLngLat(
+        [
+          pose.longitude,
+          pose.latitude,
+        ],
+        0,
+      );
+
+    this.dropPositions[0] =
+      aircraftCoordinate.x;
+
+    this.dropPositions[1] =
+      aircraftCoordinate.y;
+
+    this.dropPositions[2] =
+      aircraftCoordinate.z;
+
+    this.dropPositions[3] =
+      groundCoordinate.x;
+
+    this.dropPositions[4] =
+      groundCoordinate.y;
+
+    this.dropPositions[5] =
+      groundCoordinate.z;
+
+    const attribute =
+      this.dropGeometry.getAttribute(
+        "position",
+      ) as THREE.BufferAttribute;
+
+    attribute.needsUpdate = true;
+
+    this.dropGeometry.setDrawRange(
+      0,
+      2,
+    );
+
+    this.dropGeometry.computeBoundingSphere();
   }
 }

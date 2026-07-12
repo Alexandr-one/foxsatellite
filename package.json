@@ -1,9 +1,8 @@
 {
   "name": "adaptive-satellite-map",
   "displayName": "Adaptive Satellite Map",
-  "description": "Adaptive satellite map with a true 3D aircraft model.",
+  "description": "Satellite map with live aircraft model, exact camera footprint and telemetry-driven orientation.",
   "publisher": "alex-nurba-valya",
-  "homepage": "",
   "version": "0.3.0",
   "license": "MIT",
   "main": "./dist/extension.js",
@@ -12,17 +11,16 @@
     "map",
     "satellite",
     "uav",
+    "aircraft",
     "mcap"
   ],
   "scripts": {
     "build": "foxglove-extension build",
     "foxglove:prepublish": "foxglove-extension build --mode production",
-    "lint": "eslint .",
-    "lint:ci": "eslint .",
-    "lint:fix": "eslint --fix .",
     "local-install": "foxglove-extension install",
     "package": "foxglove-extension package",
-    "pretest": "foxglove-extension pretest"
+    "lint": "eslint .",
+    "lint:fix": "eslint --fix ."
   },
   "dependencies": {
     "maplibre-gl": "^5.6.2",

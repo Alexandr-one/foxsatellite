@@ -107,3 +107,4 @@ www/js/*
 .DS_Store
 
 *.mcap   
+*.foxe
